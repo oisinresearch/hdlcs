@@ -97,6 +97,25 @@ q: The modulus (sieving prime).
 
 a2...a16: The lattice basis elements.
 
+## Example
+```bash
+$ time taskset -c 0,1 ./fast39 2 97668217 27746440 9402514 8743350 55200183 7
+6204135 25242614 58741714 77664091 71711529 55743037 60840359 117016 16068556 93981235 18969686
+Benchmark: 1003.15 us | Unique: 53
+
+real    0m1.009s
+user    0m1.735s
+sys     0m0.043s
+
+$ time taskset -c 0,1 ./fast39 2 9913 8092 5930 8439 3512 6846 2196 5202 3341
+ 3258 9673 3544 5953 7008 8399 7757
+Benchmark: 1602.79 us | Unique: 430590
+
+real    0m1.607s
+user    0m2.921s
+sys     0m0.057s
+```
+
 ## Disclaimer
 
 This is experimental research code. It is not production-hardened and may
