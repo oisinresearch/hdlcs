@@ -66,6 +66,7 @@ struct SpinBarrier {
     SpinBarrier(int n) : num_threads(n) {}
     
     void wait() {
+        if (num_threads <= 1) return; // Immediate return for debug/single-thread
         int gen = generation.load(std::memory_order_acquire);
         if (count.fetch_add(1, std::memory_order_acq_rel) == num_threads - 1) {
             count.store(0, std::memory_order_release);
@@ -107,7 +108,11 @@ struct MITM_Workspace {
     // Thread-local buckets [thread_id][region]
     Bucket buckets[2][NUM_REGIONS];
     
+#ifdef DEBUG
+    MITM_Workspace() : barrier(1) { // Single thread barrier for debug
+#else
     MITM_Workspace() : barrier(2) {
+#endif
         array = (uint8_t*)calloc(ARRAY_SIZE, 1);
         if (!array) {
             cerr << "CRITICAL ERROR: Failed to allocate 4GB sieve array." << endl;
@@ -639,8 +644,14 @@ int main(int argc, char** argv)
                 ws.barrier.wait();
                 
                 // Phase 2: Parallel execution of Right Half
+#ifdef DEBUG
+                // For single thread debug, thread_id 0 covers the full range
+                uint32_t start_idx = 0;
+                uint32_t end_idx = 65536;
+#else
                 uint32_t start_idx = (thread_id == 0) ? 0 : 32768;
                 uint32_t end_idx = (thread_id == 0) ? 32768 : 65536;
+#endif
                 
                 int64_t s2 = 0;
                 for (int m = 0; m < 8; m++) {
@@ -710,8 +721,13 @@ int main(int argc, char** argv)
         memset(rat_ws.array, 0, ARRAY_SIZE);
 
         auto start = std::chrono::high_resolution_clock::now();
-        cout << "# Launching 4-thread execution for HDLCS parallel MITM..." << endl;
         
+#ifdef DEBUG
+        cout << "# DEBUG: Launching serial execution for HDLCS MITM..." << endl;
+        thread_func(0, 0); // Alg Side
+        thread_func(1, 0); // Rat Side
+#else
+        cout << "# Launching 4-thread execution for HDLCS parallel MITM..." << endl;
         // Exactly 4 threads (2 Alg, 2 Rat)
         std::thread t0(thread_func, 0, 0);
         std::thread t1(thread_func, 0, 1);
@@ -719,13 +735,13 @@ int main(int argc, char** argv)
         std::thread t3(thread_func, 1, 1);
         
         t0.join(); t1.join(); t2.join(); t3.join();
+#endif
         
         auto end = std::chrono::high_resolution_clock::now();
         cout << "# HDLCS Enumeration Finished! Time: " 
              << std::chrono::duration<double>(end - start).count() << "s" << endl;
 
         // --- Linear Sweep utilizing the same 4 threads ---
-        cout << "# Executing concurrent multi-threaded linear sweep..." << endl;
         start = std::chrono::high_resolution_clock::now();
         
         vector<int64_t> common;
@@ -747,6 +763,11 @@ int main(int argc, char** argv)
             common.insert(common.end(), local_common.begin(), local_common.end());
         };
 
+#ifdef DEBUG
+        cout << "# DEBUG: Executing serial linear sweep..." << endl;
+        sweep_worker(0, ARRAY_SIZE);
+#else
+        cout << "# Executing concurrent multi-threaded linear sweep..." << endl;
         uint64_t chunk_size = ARRAY_SIZE / 4;
         std::thread s0(sweep_worker, 0, chunk_size);
         std::thread s1(sweep_worker, chunk_size, 2 * chunk_size);
@@ -754,6 +775,7 @@ int main(int argc, char** argv)
         std::thread s3(sweep_worker, 3 * chunk_size, ARRAY_SIZE);
         
         s0.join(); s1.join(); s2.join(); s3.join();
+#endif
         
         end = std::chrono::high_resolution_clock::now();
         cout << "# Linear Sweep Finished! Time: " 
