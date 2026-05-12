@@ -50,7 +50,7 @@ const uint32_t HASH_MASK = (HASH_SIZE - 1);
 // ==================== DATA STRUCTURES ====================
 struct SieveSide {
     int k;
-    vector<int> p;
+    vector<uint32_t> p;
     vector<int> r;
     vector<int> n;
     vector<int> r_offset;
@@ -230,7 +230,7 @@ void load_factor_base(const char* filename, SieveSide* sides, uint8_t* th) {
             stringstream ss(line);
             string val;
             getline(ss, val, ',');
-            int p = stoi(val);
+            uint32_t p = stoul(val);
             sides[s].p.push_back(p);
             int count = 0;
             while (getline(ss, val, ',')) {
@@ -260,7 +260,8 @@ int64_t rel2B(int d, mpz_ptr* Bi, int64_t reli, int bb) {
 
 inline int64_t gcd(int64_t a, int64_t b) { a = abs(a); b = abs(b); while (b) { int64_t t = b; b = a % b; a = t; } return a; }
 
-void trial_divide_side(mpz_t N, const vector<int>& fb_p, const vector<int>& small_primes, string& str, stringstream& stream) {
+void trial_divide_side(mpz_t N, const vector<uint32_t>& fb_p, const vector<int>& small_primes,
+        string& str, stringstream& stream) {
     if (small_primes.empty() || fb_p.empty()) return;
     int p = small_primes[0], k = 0, max_small = 1000;
     while (p < fb_p.back()) {
@@ -508,17 +509,18 @@ bool EECM_int128(__int128 N, mpz_t S, __int128 &factor, int d, int a, int X0, in
 int main(int argc, char** argv)
 {
     MASK64 = ((int128_t)1 << 64) - 1;
-    if (argc != 13) {
-        cerr << "Usage: ./hdlcs inputpoly sievebase d Amax Bmax N pmin pmax th0 th1 lpb bb" << endl;
+    if (argc != 14) {
+        cerr << "Usage: ./hdlcs inputpoly sievebase d Amax Bmax N pmin pmax th0 th1 lpb ecmpbits bb" << endl;
         return 1;
     }
 
     int d = atoi(argv[3]);
     mpz_class maxA(argv[4]), maxB(argv[5]), lpb(argv[11]);
-    int N_units = atoi(argv[6]), pmin = atoi(argv[7]), pmax = atoi(argv[8]);
+    int N_units = atoi(argv[6]);
+    uint32_t pmin = stoul(argv[7]), pmax = stoul(argv[8]);
     uint8_t th[2] = {(uint8_t)atoi(argv[9]), (uint8_t)atoi(argv[10])};
-    int64_t cofmax = 1LL << atoi(argv[11]);
-    int bb = atoi(argv[12]);
+    int cofbits = atoi(argv[12]);
+    int bb = atoi(argv[13]);
 
     mpz_poly f0, f1;
     mpz_poly_init(f0, 10); mpz_poly_init(f1, 10);
@@ -549,6 +551,7 @@ int main(int argc, char** argv)
     mpz_init(N0); mpz_init(N1); mpz_init(S); mpz_init(factor); mpz_init(p1); mpz_init(p2);
     mpz_init(t); mpz_init(g1); mpz_init(A); mpz_init(B);
     for (int i = 0; i < 8; i++) mpz_init(pi[i]);
+    int cofmax = 1 << cofbits;
     GetlcmScalar(cofmax, S, small_primes.data(), small_primes.size());
 
     // Allocate on the heap
@@ -572,7 +575,7 @@ int main(int argc, char** argv)
             if (side.p[i] < pmin) continue;
             if (side.p[i] >= pmax) break;
             
-            int64_t p = side.p[i];
+            int32_t p = side.p[i];
             uint8_t logp = (uint8_t)max(1.0, log(p));
 
             // OPTIMIZATION: Trigger global thread flush if logp has advanced
