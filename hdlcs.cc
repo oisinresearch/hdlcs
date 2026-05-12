@@ -508,18 +508,17 @@ bool EECM_int128(__int128 N, mpz_t S, __int128 &factor, int d, int a, int X0, in
 int main(int argc, char** argv)
 {
     MASK64 = ((int128_t)1 << 64) - 1;
-    if (argc != 17) {
-        cerr << "Usage: ./hdlcs inputpoly fb d Amax Bmax N Bmin Bmax Rmin Rmax th0 th1 lpb bits mbb bb" << endl;
+    if (argc != 13) {
+        cerr << "Usage: ./hdlcs inputpoly sievebase d Amax Bmax N pmin pmax th0 th1 lpb bb" << endl;
         return 1;
     }
 
     int d = atoi(argv[3]);
-    mpz_class maxA(argv[4]), maxB(argv[5]), lpb(argv[13]);
-    int N_units = atoi(argv[6]), Bmin = atoi(argv[7]), Bmax = atoi(argv[8]);
-    int Rmin = atoi(argv[9]), Rmax = atoi(argv[10]);
-    uint8_t th[2] = {(uint8_t)atoi(argv[11]), (uint8_t)atoi(argv[12])};
-    int64_t cofmax = 1LL << atoi(argv[14]);
-    int mbb = atoi(argv[15]), bb = atoi(argv[16]);
+    mpz_class maxA(argv[4]), maxB(argv[5]), lpb(argv[11]);
+    int N_units = atoi(argv[6]), pmin = atoi(argv[7]), pmax = atoi(argv[8]);
+    uint8_t th[2] = {(uint8_t)atoi(argv[9]), (uint8_t)atoi(argv[10])};
+    int64_t cofmax = 1LL << atoi(argv[11]);
+    int bb = atoi(argv[12]);
 
     mpz_poly f0, f1;
     mpz_poly_init(f0, 10); mpz_poly_init(f1, 10);
@@ -570,12 +569,12 @@ int main(int argc, char** argv)
         uint8_t last_logp = 0;
         
         for (int i = 0; i < kmax; i++) {
-            if (side.p[i] < Bmin) continue;
-            if (side.p[i] >= Bmax) break;
+            if (side.p[i] < pmin) continue;
+            if (side.p[i] >= pmax) break;
             
             int64_t p = side.p[i];
-            uint8_t logp = (uint8_t)max(1.0, log2(p));
-            
+            uint8_t logp = (uint8_t)max(1.0, log(p));
+
             // OPTIMIZATION: Trigger global thread flush if logp has advanced
             if (logp != last_logp) {
                 if (last_logp != 0) {
