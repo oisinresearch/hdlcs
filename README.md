@@ -103,8 +103,9 @@ of the 4GB arrays, and cofactorization of potential relations.
 * seed: Random seed for reproducibility.
 
 ### Example Execution:
-
+```bash
 $ time taskset -c 0,1,2,3 ./hdlcs rsa1024b.poly rsa1024b.M31.sb 16 5000 100000000 1 2000 100000000 90 70 549755813887 11 2 12345 | tee test001.rels
+```
 
 ## Implementation Details
 hdlcs.cc The code is organized to minimize synchronization overhead and maximize
@@ -123,7 +124,7 @@ sides exceed the specified thresholds.
 ### Cofactorization: Uses Pollard's P-1 and EECM (Edwards Elliptic Curve Method) to find
 actual relations from potential hits.
 ### Performance & Projections
-The implementation achieves stable performance across both low and highprime ranges.
+The implementation achieves stable performance across both low and high prime ranges.
 Full Range Projection: For a search up to $2^{31}-1$ (approx. 105 million primes),
 the projected runtime is 12-13 hours on a 4-core allocation.
 ### Efficiency: The code utilizes a memset clear of the 4GB arrays onlyonce per workunit,
