@@ -43,8 +43,8 @@ const int SIEVE_D = 16;
 const uint64_t ARRAY_SIZE = (1ULL << 32);     // 4GB array space
 const int NUM_REGIONS = 256;                  // For bucket sieving
 const int REGION_SHIFT = 24;                  // 32-bit idx >> 24 yields 0-255 region
-const int BUCKET_CAPACITY = 1024;
-const uint32_t HASH_SIZE = (1 << 19);
+const int BUCKET_CAPACITY = 4096;
+const uint32_t HASH_SIZE = (1 << 17);
 const uint32_t HASH_MASK = (HASH_SIZE - 1);
 
 // ==================== DATA STRUCTURES ====================
@@ -509,10 +509,30 @@ bool EECM_int128(__int128 N, mpz_t S, __int128 &factor, int d, int a, int X0, in
 int main(int argc, char** argv)
 {
     MASK64 = ((int128_t)1 << 64) - 1;
-    if (argc != 14) {
-        cerr << "Usage: ./hdlcs inputpoly sievebase d Amax Bmax N pmin pmax th0 th1 lpb ecmpbits bb" << endl;
+    if (argc != 15) {
+        cerr << "Usage: ./hdlcs inputpoly sievebase d Amax Bmax N pmin pmax th0 th1 lpb ecmpbits bb seed" << endl;
+		cout << "    inputpoly    input polynomial in N/skew/C0..Ck/Y0..Y1 format" << endl;
+		cout << "    sievebase    sieve base  produced with makesievebase" << endl;
+		cout << "    d            sieving dimension, always should be 16 for the moment" << endl;
+		cout << "    Amax         upper bound for A in A*x + B ideal generator" << endl;
+		cout << "    Bmax         upper bound for B in A*x + B ideal generator" << endl;
+		cout << "    N            number of workunits (think \"special-q\")" << endl;
+		cout << "    pmin         lower bound on sieving primes" << endl;
+		cout << "    pmax         upper bound on sieving primes" << endl;
+		cout << "    th0          sum(logp) threshold on side 0" << endl;
+		cout << "    th1          sum(logp) threshold on side 1" << endl;
+		cout << "    lpb          large prime bound for both sides (can be mpz_t)" << endl;
+		cout << "    ecmpbits     should be 11" << endl;
+		cout << "    bb           bits in lattice coefficient range (should be 2)" << endl;
+		cout << "    seed         to initialize RNG. Should be unique for given Amax, Bmax" << endl;
+		cout << endl;
         return 1;
     }
+
+	// print program execution line
+	cout << "# ";
+	for (int i = 0; i < argc; i++) cout << argv[i] << " ";
+	cout << endl;
 
     int d = atoi(argv[3]);
     mpz_class maxA(argv[4]), maxB(argv[5]), lpb(argv[11]);
@@ -521,6 +541,8 @@ int main(int argc, char** argv)
     uint8_t th[2] = {(uint8_t)atoi(argv[9]), (uint8_t)atoi(argv[10])};
     int cofbits = atoi(argv[12]);
     int bb = atoi(argv[13]);
+	int seed = stoull(argv[14]);
+
 
     mpz_poly f0, f1;
     mpz_poly_init(f0, 10); mpz_poly_init(f1, 10);
@@ -528,16 +550,21 @@ int main(int argc, char** argv)
     parse_polynomial(argv[1], f0, f1, skew, degf, degg);
 
     SieveSide sides[2];
-    load_factor_base(argv[2], sides, th);
 
+	cout << "# Loading sieve base data..." << flush;
+    load_factor_base(argv[2], sides, th);
+	cout << "done." << endl;
+
+	cout << "# Computing small prime array..." << flush;
     vector<int> small_primes;
     {
         int maxs = 1 << 21; vector<char> sieve(maxs + 1, 0);
         for (int i = 2; i * i <= maxs; i++) if (!sieve[i]) for (int j = i * i; j <= maxs; j += i) sieve[j] = 1;
         for (int i = 2; i <= maxs; i++) if (!sieve[i]) small_primes.push_back(i);
     }
+	cout << "done." << endl;
 
-    gmp_randstate_t state; gmp_randinit_default(state); gmp_randseed_ui(state, 123ul);
+    gmp_randstate_t state; gmp_randinit_default(state); gmp_randseed_ui(state, seed);
     vector<mpz_class> Ai(d - 2), Bi(d - 2);
     vector<mpz_ptr> Ai_ptr(d - 2), Bi_ptr(d - 2);
 
@@ -708,7 +735,7 @@ int main(int argc, char** argv)
     };
 
     for (int nn = 0; nn < N_units; nn++) {
-        cout << "\n# ========== Unit " << (nn + 1) << " / " << N_units << " ==========" << endl;
+        cout << "# ========== Unit " << (nn + 1) << " / " << N_units << " ==========" << endl;
         
         for (int i = 0; i < d - 2; i++) {
             mpz_urandomm(Ai_ptr[i], state, maxA.get_mpz_t());
@@ -719,8 +746,10 @@ int main(int argc, char** argv)
         }
 
         // Clear 4GB sieve arrays
+		cout << "# Clearing 2x sieve arrays (4GB each)..." << flush;
         memset(alg_ws.array, 0, ARRAY_SIZE);
         memset(rat_ws.array, 0, ARRAY_SIZE);
+		cout << "done." << endl;
 
         auto start = std::chrono::high_resolution_clock::now();
         
