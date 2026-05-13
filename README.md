@@ -75,9 +75,82 @@ possible to enumerate approximately Pi(2^31) sieving prime lattices into a
   to exploit mathematical symmetry, effectively halving the search space 
   without losing correctness.
 
-## Usage
+## Tools
 
-### Compilation
+### 1. makesievebase
+Before sieving, this utility generates the required factor base and roots 
+for the polynomial. It is parallelized with OpenMP for rapid generation.
+
+**Usage:**
+./makesievebase [polyfile] [pmax] [output_sb] [threads]
+```bash
+./makesievebase rsa1024b.poly 2147483647 rsa1024b.M31.sb 128
+```
+### 2. hdlcs
+The primary sieving binary. It performs lattice enumeration, linear sweeping
+of the 4GB arrays, and cofactorization of potential relations.
+
+## Parameters:
+inputpoly: Polynomial file (N/skew/C/Y format).
+sievebase: Pre-computed sieve base from makesievebase.
+d: Sieving dimension (fixed at 16).
+Amax/Bmax: Bounds for the ideal generator coefficients.
+N: Number of workunits to process.
+pmin/pmax: Range of sieving primes.
+th0/th1: Log-sum thresholds for Algebraic and Rational sides.
+lpb: Large Prime Bound.ecmpbits: Bit-length for ECM (typically 11).
+bb: Bits in lattice coefficient range (typically 2).
+seed: Random seed for reproducibility.
+
+## Example Execution:
+
+$ time taskset -c 0,1,2,3 ./hdlcs rsa1024b.poly rsa1024b.M31.sb 16 5000 100000000 1 2000 100000000 90 70 549755813887 11 2 12345 | tee test001.rels
+
+## Implementation Details
+hdlcs.cc The code is organized to minimize synchronization overhead and maximize
+memory throughput.
+# MITM_Workspace: Encapsulates the 4GB sieve array, bucket-sieving buffers, and the
+shared hash table used for enumeration.
+# 4-Thread Architecture:
+* Threads 0 & 1: Algebraic side MITM.
+* Threads 2 & 3: Rational side MITM.
+# Enumeration Phases:
+* Phase 1: One thread populates a hash table with the "Left Half"of the 16D orthotope.
+* Phase 2: Both threads search the "Right Half" in parallel,emitting hits to
+region-specific buckets.
+# Linear Sweep: A multi-threaded scan of the 4GB arrays to identify indiceswhere both
+sides exceed the specified thresholds.
+# Cofactorization: Uses Pollard's P-1 and EECM (Edwards Elliptic Curve Method) to find
+actual relations from potential hits.
+# Performance & Projections
+The implementation achieves stable performance across both low and highprime ranges.
+Full Range Projection: For a search up to $2^{31}-1$ (approx. 105 million primes),
+the projected runtime is 12-13 hours on a 4-core allocation.
+# Efficiency: The code utilizes a memset clear of the 4GB arrays onlyonce per workunit,
+ensuring that the bulk of the time is spent on high-value MITM calculations rather
+than memory management.
+
+### Potential Speedups:
+Future optimizations to further reduce the 13-hour runtime include:
+Huge Pages: Utilizing mmap with MAP_HUGETLB to reduce TLB missesand kernel overhead
+during the 4GB array access and clearing.
+SIMD Odometer: Implementing the incremental sum updates (v-tablelookups) using AVX-512
+to process multiple dimensions of the 16Dorthotope in a single instruction.
+Generation Counting: Replacing the memset with a generation-basedtag in the sieve array
+to eliminate clearing overhead entirely.
+
+### Additional Considerations
+
+**1. System Time and Memory Management**
+As noted in your recent runs, the `sys` time remains a significant factor (approx. 25% of real time). This is largely due to the kernel managing the 4GB virtual memory space. Implementing **Transparent Huge Pages (THP)** or explicit **HugeTLB** support in `MITM_Workspace` would likely reclaim most of that `sys` time, converting it into faster `user` execution.
+
+**2. Randomization and Reproducibility**
+The inclusion of the `seed` parameter in the `main` function is critical. When running on clusters like Meluxina, you should ensure that each task in your job array receives a unique seed (e.g., `seed = $SLURM_ARRAY_TASK_ID`) to ensure threads are exploring different parts of the relation space.
+
+**3. Memory Bandwidth**
+Since you are running 4 threads against 4GB of RAM, you are likely nearing the effective band
+
+### fast39.cc
 We use pthreads:
 ```bash
 g++ -O3 -march=native -flto=auto -pthread -falign-functions=32 \
