@@ -44,8 +44,11 @@ const uint64_t ARRAY_SIZE = (1ULL << 32);     // 4GB array space
 const int NUM_REGIONS = 256;                  // For bucket sieving
 const int REGION_SHIFT = 24;                  // 32-bit idx >> 24 yields 0-255 region
 const int BUCKET_CAPACITY = 4096;
-const uint32_t HASH_SIZE = (1 << 17);
+const uint32_t HASH_SIZE = (1 << 19);         // Increased size from fast42.cc
 const uint32_t HASH_MASK = (HASH_SIZE - 1);
+
+const int N7 = 16384;                         // 4^7 combinations
+const int N8 = 65536;                         // 4^8 combinations
 
 // ==================== DATA STRUCTURES ====================
 struct SieveSide {
@@ -79,12 +82,6 @@ struct SpinBarrier {
     }
 };
 
-struct LeftNode {
-    uint32_t coords;
-    uint32_t next;
-};
-
-// OPTIMIZATION: logp is removed; entries strictly hold memory locations.
 struct Bucket {
     uint32_t idx[BUCKET_CAPACITY];
     int count = 0;
@@ -94,15 +91,13 @@ struct MITM_Workspace {
     uint8_t* array;
     std::mutex region_locks[NUM_REGIONS];
     
-    // Hash Table for Left Half (Shared between thread 0 and 1)
-    uint32_t head[HASH_SIZE];
+    // Hash Table for Unique Left Half sums
     uint32_t last_run[HASH_SIZE];
     int64_t keys[HASH_SIZE];
+    uint32_t coords[HASH_SIZE]; // Stores the unique left_idx
+    uint16_t info[HASH_SIZE];   // Symmetry info: bit 0: negatable, bits 1-3: fnz (+2 offset)
     
-    LeftNode nodes[16384 + 1];
-    uint32_t node_count = 1;
     uint32_t current_run = 0;
-    
     SpinBarrier barrier;
     
     // Thread-local buckets [thread_id][region]
@@ -247,15 +242,25 @@ void load_factor_base(const char* filename, SieveSide* sides, uint8_t* th) {
 // ==================== RELATIONS & COFACTORING ====================
 
 int64_t rel2A(int d, mpz_ptr* Ai, int64_t reli, int bb) {
-    int64_t BB = 1LL << bb, hB = 1LL << (bb - 1), A = 0;
-    for (int j = 0; j < d - 2; j++) A += mpz_get_si(Ai[j]) * (((reli >> (bb * j)) & (BB - 1)) - hB);
-    return A + (((reli >> (bb * (d - 2))) & (BB - 1)) - hB);
+    int64_t A = 0; uint32_t id = (uint32_t)reli;
+    for (int i = 0; i < 16; i++) {
+        int64_t vi = (int64_t)(id & 3) - 2; id >>= 2;
+        if (i == 0) continue;
+        if (i == 1) A += vi;
+        else A += vi * mpz_get_si(Ai[i - 2]);
+    }
+    return A;
 }
 
 int64_t rel2B(int d, mpz_ptr* Bi, int64_t reli, int bb) {
-    int64_t BB = 1LL << bb, hB = 1LL << (bb - 1), B = 0;
-    for (int j = 0; j < d - 2; j++) B += mpz_get_si(Bi[j]) * (((reli >> (bb * j)) & (BB - 1)) - hB);
-    return B - (((reli >> (bb * (d - 1))) & (BB - 1)) - hB);
+    int64_t B = 0; uint32_t id = (uint32_t)reli;
+    for (int i = 0; i < 16; i++) {
+        int64_t vi = (int64_t)(id & 3) - 2; id >>= 2;
+        if (i == 0) B -= vi;
+        else if (i == 1) continue;
+        else B += vi * mpz_get_si(Bi[i - 2]);
+    }
+    return B;
 }
 
 inline int64_t gcd(int64_t a, int64_t b) { a = abs(a); b = abs(b); while (b) { int64_t t = b; b = a % b; a = t; } return a; }
@@ -511,37 +516,37 @@ int main(int argc, char** argv)
     MASK64 = ((int128_t)1 << 64) - 1;
     if (argc != 15) {
         cerr << "Usage: ./hdlcs inputpoly sievebase d Amax Bmax N pmin pmax th0 th1 lpb ecmpbits bb seed" << endl;
-		cout << "    inputpoly    input polynomial in N/skew/C0..Ck/Y0..Y1 format" << endl;
-		cout << "    sievebase    sieve base  produced with makesievebase" << endl;
-		cout << "    d            sieving dimension, always should be 16 for the moment" << endl;
-		cout << "    Amax         upper bound for A in A*x + B ideal generator" << endl;
-		cout << "    Bmax         upper bound for B in A*x + B ideal generator" << endl;
-		cout << "    N            number of workunits (think \"special-q\")" << endl;
-		cout << "    pmin         lower bound on sieving primes" << endl;
-		cout << "    pmax         upper bound on sieving primes" << endl;
-		cout << "    th0          sum(logp) threshold on side 0" << endl;
-		cout << "    th1          sum(logp) threshold on side 1" << endl;
-		cout << "    lpb          large prime bound for both sides (can be mpz_t)" << endl;
-		cout << "    ecmpbits     should be 11" << endl;
-		cout << "    bb           bits in lattice coefficient range (should be 2)" << endl;
-		cout << "    seed         to initialize RNG. Should be unique for given Amax, Bmax" << endl;
-		cout << endl;
+        cout << "    inputpoly    input polynomial in N/skew/C0..Ck/Y0..Y1 format" << endl;
+        cout << "    sievebase    sieve base  produced with makesievebase" << endl;
+        cout << "    d            sieving dimension, always should be 16 for the moment" << endl;
+        cout << "    Amax         upper bound for A in A*x + B ideal generator" << endl;
+        cout << "    Bmax         upper bound for B in A*x + B ideal generator" << endl;
+        cout << "    N            number of workunits (think \"special-q\")" << endl;
+        cout << "    pmin         lower bound on sieving primes" << endl;
+        cout << "    pmax         upper bound on sieving primes" << endl;
+        cout << "    th0          sum(logp) threshold on side 0" << endl;
+        cout << "    th1          sum(logp) threshold on side 1" << endl;
+        cout << "    lpb          large prime bound for both sides (can be mpz_t)" << endl;
+        cout << "    ecmpbits     should be 11" << endl;
+        cout << "    bb           bits in lattice coefficient range (should be 2)" << endl;
+        cout << "    seed         to initialize RNG. Should be unique for given Amax, Bmax" << endl;
+        cout << endl;
         return 1;
     }
 
-	// print program execution line
-	cout << "# ";
-	for (int i = 0; i < argc; i++) cout << argv[i] << " ";
-	cout << endl;
+    // print program execution line
+    cout << "# ";
+    for (int i = 0; i < argc; i++) cout << argv[i] << " ";
+    cout << endl;
 
-    int d = atoi(argv[3]);
+    int d_param = atoi(argv[3]);
     mpz_class maxA(argv[4]), maxB(argv[5]), lpb(argv[11]);
     int N_units = atoi(argv[6]);
     uint32_t pmin = stoul(argv[7]), pmax = stoul(argv[8]);
     uint8_t th[2] = {(uint8_t)atoi(argv[9]), (uint8_t)atoi(argv[10])};
     int cofbits = atoi(argv[12]);
     int bb = atoi(argv[13]);
-	int seed = stoull(argv[14]);
+    int seed = stoull(argv[14]);
 
 
     mpz_poly f0, f1;
@@ -551,32 +556,32 @@ int main(int argc, char** argv)
 
     SieveSide sides[2];
 
-	cout << "# Loading sieve base data..." << flush;
+    cout << "# Loading sieve base data..." << flush;
     load_factor_base(argv[2], sides, th);
-	cout << "done." << endl;
+    cout << "done." << endl;
 
-	cout << "# Computing small prime array..." << flush;
+    cout << "# Computing small prime array..." << flush;
     vector<int> small_primes;
     {
         int maxs = 1 << 21; vector<char> sieve(maxs + 1, 0);
         for (int i = 2; i * i <= maxs; i++) if (!sieve[i]) for (int j = i * i; j <= maxs; j += i) sieve[j] = 1;
         for (int i = 2; i <= maxs; i++) if (!sieve[i]) small_primes.push_back(i);
     }
-	cout << "done." << endl;
+    cout << "done." << endl;
 
     gmp_randstate_t state; gmp_randinit_default(state); gmp_randseed_ui(state, seed);
-    vector<mpz_class> Ai(d - 2), Bi(d - 2);
-    vector<mpz_ptr> Ai_ptr(d - 2), Bi_ptr(d - 2);
+    vector<mpz_class> Ai(14), Bi(14);
+    vector<mpz_ptr> Ai_ptr(14), Bi_ptr(14);
 
-    for (int i = 0; i < d - 2; i++) { 
+    for (int i = 0; i < 14; i++) { 
         Ai_ptr[i] = Ai[i].get_mpz_t(); 
         Bi_ptr[i] = Bi[i].get_mpz_t(); 
     }
 
     mpz_poly i1; mpz_poly_init(i1, 3);
-    mpz_t N0, N1, S, factor, p1, p2, t, g1, A, B, pi[8];
+    mpz_t N0, N1, S, factor, p1, p2, t, g1, A_var, B_var, pi[8];
     mpz_init(N0); mpz_init(N1); mpz_init(S); mpz_init(factor); mpz_init(p1); mpz_init(p2);
-    mpz_init(t); mpz_init(g1); mpz_init(A); mpz_init(B);
+    mpz_init(t); mpz_init(g1); mpz_init(A_var); mpz_init(B_var);
     for (int i = 0; i < 8; i++) mpz_init(pi[i]);
     int cofmax = 1 << cofbits;
     GetlcmScalar(cofmax, S, small_primes.data(), small_primes.size());
@@ -597,11 +602,11 @@ int main(int argc, char** argv)
         const SieveSide& side = sides[side_idx];
         int kmax = side.k;
         uint8_t last_logp = 0;
-        
+
         for (int i = 0; i < kmax; i++) {
             if (side.p[i] < pmin) continue;
             if (side.p[i] >= pmax) break;
-            
+
             int32_t p = side.p[i];
             uint8_t logp = (uint8_t)max(1.0, log(p));
 
@@ -614,115 +619,144 @@ int main(int argc, char** argv)
             }
 
             int ni = side.n[i];
-            
+
             for (int j = 0; j < ni; j++) {
                 int r = side.r[side.r_offset[i] + j];
-                
+
                 // Map logical matrix variables (rel2A indexing) into physical loop variables
+                // Identity row: p, r, a2*r+b2, ..., a15*r+b15
                 int64_t a[16];
-                a[0] = p; // Dim 15 (mapped from bits 30..31)
-                for (int k = 0; k < 14; k++) {
-                    a[k + 1] = (mpz_fdiv_ui(Ai_ptr[k], p) * r + mpz_fdiv_ui(Bi_ptr[k], p)) % p;
-                } // Dims 0..13 (mapped from bits 0..27)
-                a[15] = r; // Dim 14 (mapped from bits 28..29)
-                
-                int64_t v[16][4];
-                for (int m = 0; m < 16; m++) {
-                    for (int k = 0; k < 4; k++) v[m][k] = (int64_t)alpha[k] * a[m];
+                a[0] = p - 1;
+                a[1] = r % p;
+                for (int k = 2; k < 16; k++) {
+                    int64_t val = (mpz_fdiv_ui(Ai_ptr[k-2], p) * r + mpz_fdiv_ui(Bi_ptr[k-2], p)) % p;
+                    a[k] = (val < 0) ? val + p : val;
                 }
-                
+
+                int64_t v_mat[16][4];
+                for (int m = 0; m < 16; m++) {
+                    for (int k = 0; k < 4; k++) {
+                        int64_t val = (int64_t)alpha[k] * a[m] % p;
+                        v_mat[m][k] = (val < 0) ? val + p : val;
+                    }
+                }
+
                 ws.current_run++;
-                
-                // Phase 1: Thread 0 populates the hash table with Left Half
+
+                // Phase 1: Thread 0 populates the hash table with Left Half (v0..v7)
                 if (thread_id == 0) {
-                    ws.node_count = 1;
+                    int x[7] = {0,0,0,0,0,0,0};
                     int64_t s1 = 0;
-                    for (int m = 1; m <= 7; m++) s1 += v[m][0];
-                    
-                    for (uint32_t left_idx = 0; left_idx < 16384; left_idx++) {
+                    for (int m = 0; m < 7; m++) s1 += v_mat[m+1][0];
+
+                    for (uint32_t left_idx = 0; left_idx < N7; left_idx++) {
                         int64_t m1 = s1 % p; if (m1 < 0) m1 += p;
                         uint32_t h = hash_func(m1);
-                        
+
                         while (ws.last_run[h] == ws.current_run && ws.keys[h] != m1) h = (h + 1) & HASH_MASK;
                         if (ws.last_run[h] != ws.current_run) {
                             ws.last_run[h] = ws.current_run;
                             ws.keys[h] = m1;
-                            ws.head[h] = 0;
-                        }
-                        
-                        uint32_t node = ws.node_count++;
-                        ws.nodes[node].coords = left_idx;
-                        ws.nodes[node].next = ws.head[h];
-                        ws.head[h] = node;
-                        
-                        // Advance Left Odometer
-                        for (int m = 0; m < 7; m++) {
-                            int idx_v = m + 1;
-                            int curr_val = (left_idx >> (2 * m)) & 3;
-                            if (curr_val < 3) {
-                                s1 += (v[idx_v][curr_val + 1] - v[idx_v][curr_val]);
-                                break;
-                            } else {
-                                s1 += (v[idx_v][0] - v[idx_v][3]);
+                            ws.coords[h] = left_idx;
+
+                            // INTEGRATED OPTIMIZATION: Calculate Left Symmetry Info
+                            bool l_neg = true;
+                            int8_t l_fnz = 0;
+                            for(int m=0; m<7; m++) {
+                                int8_t c = alpha[x[m]];
+                                if (c == -2) l_neg = false;
+                                if (l_fnz == 0 && c != 0) l_fnz = c;
                             }
+                            ws.info[h] = (uint16_t)((l_neg ? 1 : 0) | (((uint16_t)l_fnz + 2) << 1));
                         }
+
+                        // Odometer Logic from fast42.cc
+                        for(int j=0; j<7; j++) {
+                            if(++x[j] < 4) {
+                                s1 += (v_mat[j+1][x[j]] - v_mat[j+1][x[j]-1]);
+                                goto next_left;
+                            }
+                            s1 += (v_mat[j+1][0] - v_mat[j+1][3]);
+                            x[j] = 0;
+                        }
+                        next_left:;
                     }
                 }
-                
+
                 // Block until Thread 0 finishes caching Left Half
                 ws.barrier.wait();
-                
-                // Phase 2: Parallel execution of Right Half
+
+                // Phase 2: Parallel execution of Right Half (v8..v15)
 #ifdef DEBUG
                 // For single thread debug, thread_id 0 covers the full range
                 uint32_t start_idx = 0;
-                uint32_t end_idx = 65536;
+                uint32_t end_idx = N8;
 #else
-                uint32_t start_idx = (thread_id == 0) ? 0 : 32768;
-                uint32_t end_idx = (thread_id == 0) ? 32768 : 65536;
+                uint32_t start_idx = (thread_id == 0) ? 0 : N8/2;
+                uint32_t end_idx = (thread_id == 0) ? N8/2 : N8;
 #endif
-                
+
+                int x8[8];
                 int64_t s2 = 0;
                 for (int m = 0; m < 8; m++) {
-                    s2 += v[m + 8][(start_idx >> (2 * m)) & 3];
+                    x8[m] = (start_idx >> (2 * m)) & 3;
+                    s2 += v_mat[m + 8][x8[m]];
                 }
-                
+
                 for (uint32_t right_idx = start_idx; right_idx < end_idx; right_idx++) {
+                    // INTEGRATED OPTIMIZATION: Calculate Right Symmetry Info
+                    bool r_neg = true;
+                    int8_t r_fnz = 0;
+                    for(int m=0; m<8; m++) {
+                        int8_t c = alpha[x8[m]];
+                        if (c == -2) r_neg = false;
+                        if (r_fnz == 0 && c != 0) r_fnz = c;
+                    }
+
                     int64_t m2 = s2 % p; if (m2 < 0) m2 += p;
-                    int64_t target = p - m2; if (target == p) target = 0;
-                    
-                    uint32_t h = hash_func(target);
-                    while (ws.last_run[h] == ws.current_run) {
-                        if (ws.keys[h] == target) {
-                            uint32_t curr = ws.head[h];
-                            while (curr != 0) {
-                                uint32_t left_idx = ws.nodes[curr].coords;
-                                // Shift variables into correct mapping for rel2A logic
-                                uint32_t base_idx = left_idx | (right_idx << 14);
-                                for (int k = 0; k < 4; k++) {
-                                    uint32_t full_idx = base_idx | (k << 30);
+
+                    // Separate loop for v0: Treat v0 as a seeker to find matches
+                    for (int a_idx = 0; a_idx < 4; a_idx++) {
+                        int8_t v0 = alpha[a_idx];
+                        
+                        // Target is: (v0 * a[0] - m2) mod p
+                        // In your basis setup, a[0] = p-1 (which is -1 mod p)
+                        int64_t target = (p - (m2 + (int64_t)v0 * a[0]) % p) % p;
+                        if (target < 0) target += p;
+
+                        uint32_t h = hash_func(target);
+                        while (ws.last_run[h] == ws.current_run) {
+                            if (ws.keys[h] == target) {
+                                // Symmetry and trivial check...
+                                bool is_negatable = (ws.info[h] & 1) && r_neg && (v0 == -1 || v0 == 0 || v0 == 1);
+                                
+                                // Determine the actual first non-zero coefficient including v0
+                                int8_t fnz = v0;
+                                if (fnz == 0) fnz = (int8_t)((ws.info[h] >> 1) & 7) - 2;
+                                if (fnz == 0) fnz = r_fnz;
+
+                                if (!is_negatable || fnz > 0) {
+                                    uint32_t full_idx = (uint32_t)a_idx | (ws.coords[h] << 2) | (right_idx << 16);
+                                    // Note, pari function recovers vector
+                                    // vec(id) = vector(16, i, [-2, -1, 0, 1][bitand(id >> (2*(i-1)), 3) + 1])
                                     ws.emit_to_bucket(thread_id, full_idx, logp);
                                 }
-                                curr = ws.nodes[curr].next;
                             }
-                            break;
+                            h = (h + 1) & HASH_MASK;
                         }
-                        h = (h + 1) & HASH_MASK;
                     }
-                    
-                    // Advance Right Odometer
+
                     for (int m = 0; m < 8; m++) {
-                        int idx_v = m + 8;
-                        int curr_val = (right_idx >> (2 * m)) & 3;
-                        if (curr_val < 3) {
-                            s2 += (v[idx_v][curr_val + 1] - v[idx_v][curr_val]);
+                        if (++x8[m] < 4) {
+                            s2 += (v_mat[m + 8][x8[m]] - v_mat[m + 8][x8[m] - 1]);
                             break;
                         } else {
-                            s2 += (v[idx_v][0] - v[idx_v][3]);
+                            s2 += (v_mat[m + 8][0] - v_mat[m + 8][3]);
+                            x8[m] = 0;
                         }
                     }
                 }
-                
+
                 // Synchronize before tearing down or starting next prime
                 ws.barrier.wait();
             }
@@ -734,22 +768,23 @@ int main(int argc, char** argv)
         }
     };
 
+
     for (int nn = 0; nn < N_units; nn++) {
         cout << "# ========== Unit " << (nn + 1) << " / " << N_units << " ==========" << endl;
         
-        for (int i = 0; i < d - 2; i++) {
+        for (int i = 0; i < 14; i++) {
             mpz_urandomm(Ai_ptr[i], state, maxA.get_mpz_t());
             mpz_urandomm(Bi_ptr[i], state, maxB.get_mpz_t());
-            char str1[64], str2[64];
+            char str1[1024], str2[1024];
             mpz_get_str(str1, 10, Ai_ptr[i]); mpz_get_str(str2, 10, Bi_ptr[i]);
             cout << "# " << str1 << "*x + " << str2 << endl;
         }
 
         // Clear 4GB sieve arrays
-		cout << "# Clearing 2x sieve arrays (4GB each)..." << flush;
+        cout << "# Clearing 2x sieve arrays (4GB each)..." << flush;
         memset(alg_ws.array, 0, ARRAY_SIZE);
         memset(rat_ws.array, 0, ARRAY_SIZE);
-		cout << "done." << endl;
+        cout << "done." << endl;
 
         auto start = std::chrono::high_resolution_clock::now();
         
@@ -774,16 +809,15 @@ int main(int argc, char** argv)
 
         // --- Linear Sweep utilizing the same 4 threads ---
         start = std::chrono::high_resolution_clock::now();
-        
-        vector<int64_t> common;
+        vector<uint32_t> common;
         std::mutex common_mutex;
         
         auto sweep_worker = [&](uint64_t start_idx, uint64_t end_idx) {
             vector<int64_t> local_common;
             for (uint64_t idx = start_idx; idx < end_idx; idx++) {
                 if (alg_ws.array[idx] >= th[0] && rat_ws.array[idx] >= th[1]) {
-                    int64_t A64 = rel2A(d, Ai_ptr.data(), idx, bb);
-                    int64_t B64 = rel2B(d, Bi_ptr.data(), idx, bb);
+                    int64_t A64 = rel2A(16, Ai_ptr.data(), idx, bb);
+                    int64_t B64 = rel2B(16, Bi_ptr.data(), idx, bb);
                     int64_t g_val = gcd(A64, B64);
                     if (A64 != 0 && B64 != 0 && abs(A64 / g_val) != 1) {
                         local_common.push_back(idx);
@@ -821,14 +855,14 @@ int main(int argc, char** argv)
         stringstream stream;
         
         for (int64_t id : common) {
-            mpz_set_si(A, rel2A(d, Ai_ptr.data(), id, bb));
-            mpz_set_si(B, rel2B(d, Bi_ptr.data(), id, bb));
-            mpz_gcd(g1, A, B); mpz_divexact(A, A, g1); mpz_divexact(B, B, g1);
-            mpz_poly_setcoeff(i1, 1, A); mpz_poly_setcoeff(i1, 0, B);
+            mpz_set_si(A_var, rel2A(16, Ai_ptr.data(), id, bb));
+            mpz_set_si(B_var, rel2B(16, Bi_ptr.data(), id, bb));
+            mpz_gcd(g1, A_var, B_var); mpz_divexact(A_var, A_var, g1); mpz_divexact(B_var, B_var, g1);
+            mpz_poly_setcoeff(i1, 1, A_var); mpz_poly_setcoeff(i1, 0, B_var);
             mpz_poly_resultant(N0, f0, i1); mpz_poly_resultant(N1, f1, i1);
             mpz_abs(N0, N0); mpz_abs(N1, N1);
 
-            string str = mpz_get_str(NULL, 10, A) + (string)"," + mpz_get_str(NULL, 10, B) + ":";
+            string str = mpz_get_str(NULL, 10, A_var) + (string)"," + mpz_get_str(NULL, 10, B_var) + ":";
             stack<mpz_ptr> QN; stack<int> Q; int algarr[3];
 
             trial_divide_side(N0, sides[0].p, small_primes, str, stream);
@@ -840,8 +874,8 @@ int main(int argc, char** argv)
                     R++;
                 }
             }
-            if (samples < 10) {
-                cout << str << endl;
+            if (samples < 40) {
+                cout << id << ":" << str << endl;
                 samples++;
             }
         }

@@ -104,6 +104,17 @@ int solve() {
         int64_t m1 = s1 % q; if (m1 < 0) m1 += q;
         bool has_m2 = (l_m2_count > 0);
         uint32_t h = hash_func(m1);
+        
+        static std::atomic<int64_t> collisions{0};
+        // ... inside Phase 1 loop, after hash_func(m1) ...
+        while (table[h].last_run == current_run) {
+            if (table[h].key == m1) { 
+                if (++collisions < 10) printf("Duplicate sum %ld at left_idx %d\n", m1, i);
+                goto next_i; 
+            }
+            h = (h + 1) & MASK;
+        }
+
         while (table[h].last_run == current_run) {
             if (table[h].key == m1) {
                 if (has_m2) table[h].c_m2++; else table[h].c_clean++;
