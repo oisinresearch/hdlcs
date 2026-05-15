@@ -672,7 +672,8 @@ int main(int argc, char** argv)
                     target_offsets[a_idx] = (p - ((int64_t)alpha[a_idx] * a[0]) % p) % p;
                 }
 
-                ws.current_run++;
+                if (thread_id == 0) ws.current_run++;
+				ws.barrier.wait();
 
                 // Phase 1: Thread 0 populates the hash table with Left Half (v0..v7)
                 if (thread_id == 0) {
@@ -681,18 +682,19 @@ int main(int argc, char** argv)
                     for (int m = 0; m < 7; m++) s1 += v_mat[m+1][0];
 
                     for (uint32_t left_idx = 0; left_idx < N7; left_idx++) {
-                        int64_t m1 = s1 % p; if (m1 < 0) m1 += p;
+					    int64_t m1 = s1 % p; if (m1 < 0) m1 += p;
                         uint32_t h = hash_func(m1);
 
-                        while (ws.last_run[h] == ws.current_run && ws.keys[h] != m1) h = (h + 1) & HASH_MASK;
-                        if (ws.last_run[h] != ws.current_run) {
-                            ws.last_run[h] = ws.current_run;
-                            ws.keys[h] = m1;
-                            ws.coords[h] = left_idx;
-
-                            // INTEGRATED OPTIMIZATION: Use precalculated Left Symmetry Info via global LUT
-                            ws.info[h] = global_l_info[left_idx];
+                        // Find the next available slot regardless of key match
+                        while (ws.last_run[h] == ws.current_run) {
+                            h = (h + 1) & HASH_MASK;
                         }
+
+                        // Store every unique left_idx
+                        ws.last_run[h] = ws.current_run;
+                        ws.keys[h] = m1;
+                        ws.coords[h] = left_idx;
+                        ws.info[h] = global_l_info[left_idx];
 
                         // Odometer Logic from fast42.cc
                         for(int j=0; j<7; j++) {
