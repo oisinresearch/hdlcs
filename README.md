@@ -110,7 +110,8 @@ $ time taskset -c 0,1,2,3 ./hdlcs rsa1024b.poly rsa1024b.M31.sb 16 5000 10000000
 ## Implementation Details
 hdlcs.cc The code is organized to minimize synchronization overhead and maximize
 memory throughput.
-### MITM_Workspace: Encapsulates the 4GB sieve array, bucket-sieving buffers, and the
+### MITM_Workspace:
+Encapsulates the 4GB sieve array, bucket-sieving buffers, and the
 shared hash table used for enumeration.
 ### 4-Thread Architecture:
 * Threads 0 & 1: Algebraic side MITM.
@@ -119,37 +120,109 @@ shared hash table used for enumeration.
 * Phase 1: One thread populates a hash table with the "Left Half"of the 16D orthotope.
 * Phase 2: Both threads search the "Right Half" in parallel,emitting hits to
 region-specific buckets.
-### Linear Sweep: A multi-threaded scan of the 4GB arrays to identify indiceswhere both
+### Linear Sweep:
+A multi-threaded scan of the 4GB arrays to identify indiceswhere both
 sides exceed the specified thresholds.
-### Cofactorization: Uses Pollard's P-1 and EECM (Edwards Elliptic Curve Method) to find
+### Cofactorization:
+Uses Pollard's P-1 and EECM (Edwards Elliptic Curve Method) to find
 actual relations from potential hits.
 ### Performance & Projections
 The implementation achieves stable performance across both low and high prime ranges.
 Full Range Projection: For a search up to $2^{31}-1$ (approx. 105 million primes),
 the projected runtime is 12-13 hours on a 4-core allocation.
-### Efficiency: The code utilizes a memset clear of the 4GB arrays onlyonce per workunit,
+### Efficiency:
+The code utilizes a memset clear of the 4GB arrays onlyonce per workunit,
 ensuring that the bulk of the time is spent on high-value MITM calculations rather
 than memory management.
 
-## Potential Speedups:
-Future optimizations to further reduce the 13-hour runtime include:
-Huge Pages: Utilizing mmap with MAP_HUGETLB to reduce TLB missesand kernel overhead
-during the 4GB array access and clearing.
-SIMD Odometer: Implementing the incremental sum updates (v-tablelookups) using AVX-512
-to process multiple dimensions of the 16Dorthotope in a single instruction.
-Generation Counting: Replacing the memset with a generation-basedtag in the sieve array
-to eliminate clearing overhead entirely.
+## Producing relations
+The main binary hdlcs is now capable of finding relations for RSA-1024.
+Using the polynomial rsa1024b.poly in this repository, some test sieving was carried out.
+The run time is not good but there is a lot of optimization left to do.
 
-## Additional Considerations
+Here is the output of one instance which found a relation:
 
-**1. System Time and Memory Management**
-As noted in your recent runs, the `sys` time remains a significant factor (approx. 25% of real time). This is largely due to the kernel managing the 4GB virtual memory space. Implementing **Transparent Huge Pages (THP)** or explicit **HugeTLB** support in `MITM_Workspace` would likely reclaim most of that `sys` time, converting it into faster `user` execution.
+```bash
+# ./hdlcs rsa1024b.poly rsa1024b.M31.sb 16 5000 100000000 1 1000 200000000 100 65 4398046511103 11 2 1812476
+# Loading sieve base data...done.
+# Computing small prime array...done.
+# ========== Unit 1 / 1 ==========
+# 3210*x + 20658519
+# 3208*x + 5297027
+# 2816*x + 78117791
+# 1800*x + 89697394
+# 1067*x + 10483530
+# 3504*x + 77052357
+# 2821*x + 98041160
+# 2706*x + 20292919
+# 1306*x + 15952415
+# 1683*x + 46678970
+# 2141*x + 65469526
+# 4083*x + 30644137
+# 800*x + 96797886
+# 901*x + 18797244
+# Clearing 2x sieve arrays (4GB each)...done.
+# Launching 4-thread execution for HDLCS parallel MITM...
+# HDLCS Enumeration Finished! Time: 13258.8s
+# Executing concurrent multi-threaded linear sweep...
+# Linear Sweep Finished! Time: 0.845064s
+# 31 potential relations found.
+# Starting cofactorization...
+1172,-25655295:2,2,2,2,2,3,5,7,7,d,2b,ef,2190b,244469,6b69d7,8895ad,21b5345,3292205,6929beb,3713fe45,604adb51db:b,1bfb5,2225f,3a5577,422b37,7588ac9,a713f8f,e68363e23
+# Cofactorization took 48.2435s
+# 1 actual relations found.
+```
 
-**2. Randomization and Reproducibility**
-The inclusion of the `seed` parameter in the `main` function is critical. When running on clusters like Meluxina, you should ensure that each task in your job array receives a unique seed (e.g., `seed = $SLURM_ARRAY_TASK_ID`) to ensure threads are exploring different parts of the relation space.
+A typical slurm script running on a 128 core node might look like this:
 
-**3. Memory Bandwidth**
-Since you are running 4 threads against 4GB of RAM, you are likely nearing the effective band
+```bash
+#!/bin/bash -l
+#SBATCH -N 1
+#SBATCH --time=05:00:00
+#SBATCH --account=NNNNNNN
+#SBATCH --partition=cpu
+#SBATCH --qos=default
+#SBATCH --cpus-per-task=128
+#SBATCH --mail-type=END
+#SBATCH --mail-user=name@domain.com
+
+cd $SLURM_SUBMIT_DIR
+
+module load GCC
+module load GMP
+module load GDB
+
+# Array of 32 seeds
+seeds=(5761819 2247845 6872380 9702806 6256416 6243731 8783914 6506512 \
+       8051602 6362647 6898766 4927732 9968914 3487059 8864868 5026344 \
+       4648617 2414845 1445631 7979571 4858867 138917 2797155 5541244 \
+       3709493 7075950 107202 9433127 9009015 8816339 1812476 5157733)
+
+# Parameters
+POLY="rsa1024b.poly"
+SB="rsa1024b.M31.sb"
+
+# Loop through 0-31 to launch 32 instances
+for i in {0..31}; do
+    SEED=${seeds[$i]}
+
+    # Calculate CPU affinity range (e.g., 0-3, 4-7, 8-11...)
+    CPU_START=$((i * 4))
+    CPU_END=$((CPU_START + 3))
+    CPUS="$CPU_START-$CPU_END"
+
+    echo "Launching instance $i with seed $SEED on CPUs $CPUS"
+
+    # Run in background (&). Each output is logged to a unique file.
+    taskset -c "$CPUS" ./hdlcs "$POLY" "$SB" 16 5000 100000000 1 1000 \
+    200000000 100 65 4398046511103 11 2 "$SEED" > "run_${SEED}.rels" 2>&1 &
+done
+
+# Wait for all background processes to finish
+wait
+
+echo "All 32 instances completed."
+```
 
 ### fast39.cc
 We use pthreads:
