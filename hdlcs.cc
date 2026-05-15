@@ -50,6 +50,10 @@ const uint32_t HASH_MASK = (HASH_SIZE - 1);
 const int N7 = 16384;                         // 4^7 combinations
 const int N8 = 65536;                         // 4^8 combinations
 
+// ==================== GLOBAL LOOKUP TABLES ====================
+uint8_t global_l_info[N7];
+uint8_t global_r_info[N8];
+
 // ==================== DATA STRUCTURES ====================
 struct SieveSide {
     int k;
@@ -569,6 +573,27 @@ int main(int argc, char** argv)
     }
     cout << "done." << endl;
 
+    // Initialize global symmetry tables to eliminate inner-loop recalculations
+    int8_t alpha_init[4] = {-2, -1, 0, 1};
+    for (uint32_t i = 0; i < N7; i++) {
+        bool l_neg = true; int8_t l_fnz = 0;
+        for(int m=0; m<7; m++) {
+            int8_t c = alpha_init[(i >> (2*m)) & 3];
+            if (c == -2) l_neg = false;
+            if (l_fnz == 0 && c != 0) l_fnz = c;
+        }
+        global_l_info[i] = (uint8_t)((l_neg ? 1 : 0) | (((l_fnz + 2) & 7) << 1));
+    }
+    for (uint32_t i = 0; i < N8; i++) {
+        bool r_neg = true; int8_t r_fnz = 0;
+        for(int m=0; m<8; m++) {
+            int8_t c = alpha_init[(i >> (2*m)) & 3];
+            if (c == -2) r_neg = false;
+            if (r_fnz == 0 && c != 0) r_fnz = c;
+        }
+        global_r_info[i] = (uint8_t)((r_neg ? 1 : 0) | (((r_fnz + 2) & 7) << 1));
+    }
+
     gmp_randstate_t state; gmp_randinit_default(state); gmp_randseed_ui(state, seed);
     vector<mpz_class> Ai(14), Bi(14);
     vector<mpz_ptr> Ai_ptr(14), Bi_ptr(14);
@@ -641,6 +666,12 @@ int main(int argc, char** argv)
                     }
                 }
 
+                // INTEGRATED OPTIMIZATION: Precalculate 4 possible targets to remove modulo from inner loop
+                int64_t target_offsets[4];
+                for (int a_idx = 0; a_idx < 4; a_idx++) {
+                    target_offsets[a_idx] = (p - ((int64_t)alpha[a_idx] * a[0]) % p) % p;
+                }
+
                 ws.current_run++;
 
                 // Phase 1: Thread 0 populates the hash table with Left Half (v0..v7)
@@ -659,15 +690,8 @@ int main(int argc, char** argv)
                             ws.keys[h] = m1;
                             ws.coords[h] = left_idx;
 
-                            // INTEGRATED OPTIMIZATION: Calculate Left Symmetry Info
-                            bool l_neg = true;
-                            int8_t l_fnz = 0;
-                            for(int m=0; m<7; m++) {
-                                int8_t c = alpha[x[m]];
-                                if (c == -2) l_neg = false;
-                                if (l_fnz == 0 && c != 0) l_fnz = c;
-                            }
-                            ws.info[h] = (uint16_t)((l_neg ? 1 : 0) | (((uint16_t)l_fnz + 2) << 1));
+                            // INTEGRATED OPTIMIZATION: Use precalculated Left Symmetry Info via global LUT
+                            ws.info[h] = global_l_info[left_idx];
                         }
 
                         // Odometer Logic from fast42.cc
@@ -704,14 +728,10 @@ int main(int argc, char** argv)
                 }
 
                 for (uint32_t right_idx = start_idx; right_idx < end_idx; right_idx++) {
-                    // INTEGRATED OPTIMIZATION: Calculate Right Symmetry Info
-                    bool r_neg = true;
-                    int8_t r_fnz = 0;
-                    for(int m=0; m<8; m++) {
-                        int8_t c = alpha[x8[m]];
-                        if (c == -2) r_neg = false;
-                        if (r_fnz == 0 && c != 0) r_fnz = c;
-                    }
+                    // INTEGRATED OPTIMIZATION: Retrieve Right Symmetry Info from L1 Cache LUT
+                    uint8_t r_info = global_r_info[right_idx];
+                    bool r_neg = r_info & 1;
+                    int8_t r_fnz = (int8_t)((r_info >> 1) & 7) - 2;
 
                     int64_t m2 = s2 % p; if (m2 < 0) m2 += p;
 
@@ -719,9 +739,8 @@ int main(int argc, char** argv)
                     for (int a_idx = 0; a_idx < 4; a_idx++) {
                         int8_t v0 = alpha[a_idx];
                         
-                        // Target is: (v0 * a[0] - m2) mod p
-                        // In your basis setup, a[0] = p-1 (which is -1 mod p)
-                        int64_t target = (p - (m2 + (int64_t)v0 * a[0]) % p) % p;
+                        // INTEGRATED OPTIMIZATION: Target modulo replaced with simple subtraction
+                        int64_t target = target_offsets[a_idx] - m2;
                         if (target < 0) target += p;
 
                         uint32_t h = hash_func(target);
@@ -739,6 +758,8 @@ int main(int argc, char** argv)
                                     uint32_t full_idx = (uint32_t)a_idx | (ws.coords[h] << 2) | (right_idx << 16);
                                     // Note, pari function recovers vector
                                     // vec(id) = vector(16, i, [-2, -1, 0, 1][bitand(id >> (2*(i-1)), 3) + 1])
+									if (full_idx == 2524127402)
+										cout << p << endl;
                                     ws.emit_to_bucket(thread_id, full_idx, logp);
                                 }
                             }
@@ -746,6 +767,7 @@ int main(int argc, char** argv)
                         }
                     }
 
+                    // Base-4 Odometer (Averages ~1.3 iterations per step, faster than maintaining Gray mapping logic)
                     for (int m = 0; m < 8; m++) {
                         if (++x8[m] < 4) {
                             s2 += (v_mat[m + 8][x8[m]] - v_mat[m + 8][x8[m] - 1]);
