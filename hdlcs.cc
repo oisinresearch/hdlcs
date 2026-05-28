@@ -673,16 +673,18 @@ int main(int argc, char** argv)
                 }
 
                 if (thread_id == 0) ws.current_run++;
-				ws.barrier.wait();
+                ws.barrier.wait();
 
                 // Phase 1: Thread 0 populates the hash table with Left Half (v0..v7)
                 if (thread_id == 0) {
                     int x[7] = {0,0,0,0,0,0,0};
-                    int64_t s1 = 0;
-                    for (int m = 0; m < 7; m++) s1 += v_mat[m+1][0];
+                    
+                    // INCREMENTAL MODULO TRACKING (from fast46)
+                    int64_t m1 = 0;
+                    for (int m = 0; m < 7; m++) m1 += v_mat[m+1][0];
+                    m1 %= p;
 
                     for (uint32_t left_idx = 0; left_idx < N7; left_idx++) {
-					    int64_t m1 = s1 % p; if (m1 < 0) m1 += p;
                         uint32_t h = hash_func(m1);
 
                         // Find the next available slot regardless of key match
@@ -696,13 +698,17 @@ int main(int argc, char** argv)
                         ws.coords[h] = left_idx;
                         ws.info[h] = global_l_info[left_idx];
 
-                        // Odometer Logic from fast42.cc
+                        // Odometer Logic with fast branchless incremental mod tracking
                         for(int j=0; j<7; j++) {
                             if(++x[j] < 4) {
-                                s1 += (v_mat[j+1][x[j]] - v_mat[j+1][x[j]-1]);
+                                m1 += (v_mat[j+1][x[j]] - v_mat[j+1][x[j]-1]);
+                                if (m1 < 0) m1 += p;
+                                else if (m1 >= p) m1 -= p;
                                 goto next_left;
                             }
-                            s1 += (v_mat[j+1][0] - v_mat[j+1][3]);
+                            m1 += (v_mat[j+1][0] - v_mat[j+1][3]);
+                            if (m1 < 0) m1 += p;
+                            else if (m1 >= p) m1 -= p;
                             x[j] = 0;
                         }
                         next_left:;
@@ -723,11 +729,13 @@ int main(int argc, char** argv)
 #endif
 
                 int x8[8];
-                int64_t s2 = 0;
+                // INCREMENTAL MODULO TRACKING (from fast46)
+                int64_t m2 = 0;
                 for (int m = 0; m < 8; m++) {
                     x8[m] = (start_idx >> (2 * m)) & 3;
-                    s2 += v_mat[m + 8][x8[m]];
+                    m2 += v_mat[m + 8][x8[m]];
                 }
+                m2 %= p;
 
                 for (uint32_t right_idx = start_idx; right_idx < end_idx; right_idx++) {
                     // INTEGRATED OPTIMIZATION: Retrieve Right Symmetry Info from L1 Cache LUT
@@ -735,17 +743,39 @@ int main(int argc, char** argv)
                     bool r_neg = r_info & 1;
                     int8_t r_fnz = (int8_t)((r_info >> 1) & 7) - 2;
 
-                    int64_t m2 = s2 % p; if (m2 < 0) m2 += p;
+                    // --- PREFETCH OPTIMIZATION BLOCK (from fast46) ---
+                    // Compute targets for k = 0, 1, 2, 3 upfront without inner modulo % operator
+                    int64_t target0 = target_offsets[0] - m2; if (target0 < 0) target0 += p;
+                    int64_t target1 = target_offsets[1] - m2; if (target1 < 0) target1 += p;
+                    int64_t target2 = target_offsets[2] - m2; if (target2 < 0) target2 += p;
+                    int64_t target3 = target_offsets[3] - m2; if (target3 < 0) target3 += p;
 
-                    // Separate loop for v0: Treat v0 as a seeker to find matches
+                    // Compute all hashes upfront
+                    uint32_t h0 = hash_func(target0);
+                    uint32_t h1 = hash_func(target1);
+                    uint32_t h2 = hash_func(target2);
+                    uint32_t h3 = hash_func(target3);
+
+                    // Issue parallel L3 -> L1 cache line prefetches
+                    __builtin_prefetch(&ws.last_run[h0], 0, 3);
+                    __builtin_prefetch(&ws.last_run[h1], 0, 3);
+                    __builtin_prefetch(&ws.last_run[h2], 0, 3);
+                    __builtin_prefetch(&ws.last_run[h3], 0, 3);
+
+                    __builtin_prefetch(&ws.keys[h0], 0, 3);
+                    __builtin_prefetch(&ws.keys[h1], 0, 3);
+                    __builtin_prefetch(&ws.keys[h2], 0, 3);
+                    __builtin_prefetch(&ws.keys[h3], 0, 3);
+
+                    int64_t targets[4] = {target0, target1, target2, target3};
+                    uint32_t hashes[4] = {h0, h1, h2, h3};
+
+                    // Execute lookups while data streams into L1 cache
                     for (int a_idx = 0; a_idx < 4; a_idx++) {
                         int8_t v0 = alpha[a_idx];
-                        
-                        // INTEGRATED OPTIMIZATION: Target modulo replaced with simple subtraction
-                        int64_t target = target_offsets[a_idx] - m2;
-                        if (target < 0) target += p;
+                        int64_t target = targets[a_idx];
+                        uint32_t h = hashes[a_idx];
 
-                        uint32_t h = hash_func(target);
                         while (ws.last_run[h] == ws.current_run) {
                             if (ws.keys[h] == target) {
                                 // Symmetry and trivial check...
@@ -760,22 +790,27 @@ int main(int argc, char** argv)
                                     uint32_t full_idx = (uint32_t)a_idx | (ws.coords[h] << 2) | (right_idx << 16);
                                     // Note, pari function recovers vector
                                     // vec(id) = vector(16, i, [-2, -1, 0, 1][bitand(id >> (2*(i-1)), 3) + 1])
-									if (full_idx == 2524127402)
-										cout << p << endl;
+                                    if (full_idx == 2524127402)
+                                        cout << p << endl;
                                     ws.emit_to_bucket(thread_id, full_idx, logp);
                                 }
                             }
                             h = (h + 1) & HASH_MASK;
                         }
                     }
+                    // --- END PREFETCH OPTIMIZATION BLOCK ---
 
-                    // Base-4 Odometer (Averages ~1.3 iterations per step, faster than maintaining Gray mapping logic)
+                    // Base-4 Odometer with fast incremental mod tracking
                     for (int m = 0; m < 8; m++) {
                         if (++x8[m] < 4) {
-                            s2 += (v_mat[m + 8][x8[m]] - v_mat[m + 8][x8[m] - 1]);
+                            m2 += (v_mat[m + 8][x8[m]] - v_mat[m + 8][x8[m] - 1]);
+                            if (m2 < 0) m2 += p;
+                            else if (m2 >= p) m2 -= p;
                             break;
                         } else {
-                            s2 += (v_mat[m + 8][0] - v_mat[m + 8][3]);
+                            m2 += (v_mat[m + 8][0] - v_mat[m + 8][3]);
+                            if (m2 < 0) m2 += p;
+                            else if (m2 >= p) m2 -= p;
                             x8[m] = 0;
                         }
                     }
